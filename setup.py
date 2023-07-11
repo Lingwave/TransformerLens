@@ -19,6 +19,8 @@ setup(
         "wandb",
         "fancy_einsum",
         "rich",
+        "accelerate",
+        "typing-extensions",
     ],
-    extras_require={"dev": ["pytest", "mypy", "pytest-cov"]},
+    extras_require={"dev": ["pytest", "mypy", "pytest-cov", "nbmake"]},
 )

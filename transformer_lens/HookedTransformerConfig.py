@@ -1,14 +1,18 @@
-from dataclasses import dataclass
-from typing import Union, Tuple, List, Dict, Any, Optional
-import torch
-import torch.nn as nn
-import random
-import numpy as np
+from __future__ import annotations
+
 import logging
-import json
 import pprint
+import random
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import torch
+
+from transformer_lens import utils
 
 SUPPORTED_ACTIVATIONS = ["relu", "gelu", "silu", "gelu_new", "solu_ln", "gelu_fast"]
+
 
 @dataclass
 class HookedTransformerConfig:
@@ -27,7 +31,7 @@ class HookedTransformerConfig:
         d_mlp (int, *optional*): The dimensionality of the feedforward mlp
             network. Defaults to 4 * d_model, and in an attn-only model is None.
         d_vocab (int): The size of the vocabulary. Defaults to -1, which means not set. If not set, will be
-            automatically set from the tokenizer's vocab size. 
+            automatically set from the tokenizer's vocab size.
         act_fn (str, *optional*): The activation function to use. Always
             lowercase. Supports ['relu', 'gelu', 'silu', 'gelu_new', 'solu_ln',
             'gelu_fast']. Must be set unless using an attn-only model.
@@ -39,6 +43,8 @@ class HookedTransformerConfig:
             for large models, so defaults to False
         use_split_qkv_input (bool): whether to explicitly calculate the input of
             each head separately, with a hook. Defaults to false to save memory.
+        use_hook_mlp_in (bool): whether to use a hook to get the input to the
+            MLP layer. Defaults to false to save memory.
         use_attn_scale (bool): whether to scale the attention weights by
             1/sqrt(d_head)
         model_name (str): the name of the model, used to load
@@ -73,13 +79,15 @@ class HookedTransformerConfig:
             & biases) and 'LNPre' (use LayerNorm, but no weights & biases).
             Defaults to LN
         device(str): The device to use for the model. Defaults to 'cuda' if
-            available, else 'cpu
+            available, else 'cpu'. Must be 'cuda' if `n_devices` > 1.
+        n_devices (int): The number of devices to use for the model. Defaults to 1. Layers are loaded
+            to support "pipeline parallelism", where each device is responsible for a subset of the layers.
         attention_dir (str): Whether to use causal (aka unidirectional aka GPT-2
             style) or bidirectional attention. Options are 'causal' and
             'bidirectional'. Defaults to 'causal'
         attn_only (bool): Whether to only use attention layers, no feedforward
             layers. Defaults to False
-        seed (int, *optional*): The seed to use for the model. 
+        seed (int, *optional*): The seed to use for the model.
             Used to set sources of randomness (Python, PyTorch and
             NumPy) and to initialize weights. Defaults to None. We recommend setting a seed, so your experiments are reproducible.
         initializer_range (float): The standard deviation of the normal used to
@@ -118,7 +126,7 @@ class HookedTransformerConfig:
             the [scaling laws paper](https://arxiv.org/pdf/2001.08361.pdf) found
             that that was a more meaningful number. Ignoring biases and layer
             norms, for convenience)
-        use_hook_tokens (bool): Will add a hook point on the token input to 
+        use_hook_tokens (bool): Will add a hook point on the token input to
             HookedTransformer.forward, which lets you cache or intervene on the tokens.
             Defaults to False.
     """
@@ -136,7 +144,8 @@ class HookedTransformerConfig:
     use_attn_result: bool = False
     use_attn_scale: bool = True
     use_split_qkv_input: bool = False
-    use_local_attn: bool = False 
+    use_hook_mlp_in: bool = False
+    use_local_attn: bool = False
     original_architecture: Optional[str] = None
     from_checkpoint: bool = False
     checkpoint_index: Optional[int] = None
@@ -148,6 +157,7 @@ class HookedTransformerConfig:
     init_mode: str = "gpt2"
     normalization_type: Optional[str] = "LN"
     device: Optional[str] = None
+    n_devices: int = 1
     attention_dir: str = "causal"
     attn_only: bool = False
     seed: Optional[int] = None
@@ -161,9 +171,10 @@ class HookedTransformerConfig:
     rotary_dim: Optional[int] = None
     n_params: Optional[int] = None
     use_hook_tokens: bool = False
+    gated_mlp: bool = False
 
     def __post_init__(self):
-        if self.n_heads==-1:
+        if self.n_heads == -1:
             self.n_heads = self.d_model // self.d_head
 
             if not self.d_model % (self.d_head) == 0:
@@ -211,10 +222,18 @@ class HookedTransformerConfig:
             self.n_params += self.n_layers * self.d_model * self.d_mlp * 2
 
         if self.device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = utils.get_device()
+
+        if self.n_devices > 1:
+            assert (
+                self.device == "cuda"
+            ), "n_devices > 1 is only supported on CUDA devices"
+            assert (
+                torch.cuda.device_count() >= self.n_devices
+            ), f"Not enough CUDA devices to support n_devices {self.n_devices}"
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]):
+    def from_dict(cls, config_dict: Dict[str, Any]) -> HookedTransformerConfig:
         """
         Instantiates a `HookedTransformerConfig` from a Python dictionary of
         parameters.
@@ -226,7 +245,7 @@ class HookedTransformerConfig:
 
     def __repr__(self):
         return "HookedTransformerConfig:\n" + pprint.pformat(self.to_dict())
-    
+
     def set_seed_everywhere(self, seed: int):
         torch.manual_seed(seed)
         random.seed(seed)
