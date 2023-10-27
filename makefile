@@ -18,10 +18,17 @@ docstring-test:
 	poetry run pytest transformer_lens/
 
 notebook-test:
-	poetry run pytest demos/Exploratory_Analysis_Demo.ipynb
+	poetry run pytest --nbval-sanitize-with demos/doc_sanitize.cfg demos/Main_Demo.ipynb 
+	poetry run pytest --nbval-sanitize-with demos/doc_sanitize.cfg demos/Exploratory_Analysis_Demo.ipynb
 
 test:
 	make unit-test
 	make acceptance-test
 	make docstring-test
 	make notebook-test
+
+docs-hot-reload:
+	poetry run docs-hot-reload
+
+build-docs:
+	poetry run build-docs
